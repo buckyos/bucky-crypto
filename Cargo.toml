@@ -1,0 +1,29 @@
+[package]
+name = "bucky-crypto"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+async-std = "1.12.0"
+sha2 = "0.8"
+x509-cert = { version = "0.2.5", features = ["builder"], optional = true }
+rsa = { version = "0.9.6", features = ["sha2"] }
+generic-array = { version = '0.12', default-features = false, features = ['serde'] }
+rand = '0.8.5'
+libc = "0.2.153"
+libsecp256k1 = "0.7.1"
+log = "0.4.21"
+base58 = '0.2.0'
+async-trait = "0.1.80"
+bucky-raw-codec = {git="https://github.com/buckyos/bucky-raw-codec.git", branch="main", features = ["derive"]}
+bucky-error = {git = "https://github.com/buckyos/bucky-error.git", features = ["rsa"]}
+bucky-time = {git = "https://github.com/buckyos/bucky-time.git"}
+aes = '=0.7'
+block-modes = '=0.8'
+ecies = {version = "0.2", default-features = false, features = ["pure"]}
+hex = "0.4.3"
+
+[features]
+x509 = ["x509-cert"]
