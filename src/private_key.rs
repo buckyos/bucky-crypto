@@ -3,8 +3,32 @@ use crate::*;
 use generic_array::GenericArray;
 use libc::memcpy;
 use rand::{thread_rng, Rng};
-use rsa::PublicKeyParts;
 use std::{os::raw::c_void, str::FromStr};
+use std::time::Duration;
+use bucky_time::bucky_time_now;
+use rsa::pkcs1::{DecodeRsaPrivateKey, EncodeRsaPrivateKey};
+use rsa::traits::PublicKeyParts;
+use libsecp256k1 as secp256k1;
+#[cfg(feature = "x509")]
+use rsa::pkcs1v15::SigningKey;
+use rsa::sha2::Sha256;
+#[cfg(feature = "x509")]
+use x509_cert::builder::{Builder, CertificateBuilder, Profile};
+#[cfg(feature = "x509")]
+use x509_cert::Certificate;
+#[cfg(feature = "x509")]
+use x509_cert::der::{Decode, Encode};
+#[cfg(feature = "x509")]
+use x509_cert::name::Name;
+#[cfg(feature = "x509")]
+use x509_cert::serial_number::SerialNumber;
+#[cfg(feature = "x509")]
+use x509_cert::spki::SubjectPublicKeyInfoOwned;
+#[cfg(feature = "x509")]
+use x509_cert::time::Validity;
+#[cfg(feature = "x509")]
+use rsa::pkcs1::EncodeRsaPublicKey;
+use rsa::pkcs8::EncodePublicKey;
 
 // 密钥类型的编码
 pub(crate) const KEY_TYPE_RSA: u8 = 0u8;
@@ -66,8 +90,8 @@ impl FromStr for PrivateKeyType {
 
 #[derive(Clone, Eq, PartialEq)]
 pub enum PrivateKey {
-    Rsa(rsa::RSAPrivateKey),
-    Secp256k1(::secp256k1::SecretKey),
+    Rsa(rsa::RsaPrivateKey),
+    Secp256k1(secp256k1::SecretKey),
 }
 
 // 避免私钥被日志打印出来
@@ -112,10 +136,10 @@ impl PrivateKey {
         Self::generate_rsa_by_rng(&mut rng, bits)
     }
 
-    pub fn generate_rsa_by_rng<R: Rng>(rng: &mut R, bits: usize) -> Result<Self, BuckyError> {
+    pub fn generate_rsa_by_rng<R: Rng + rand::CryptoRng>(rng: &mut R, bits: usize) -> Result<Self, BuckyError> {
         Self::check_bits(bits)?;
 
-        match rsa::RSAPrivateKey::new(rng, bits) {
+        match rsa::RsaPrivateKey::new(rng, bits) {
             Ok(rsa) => Ok(Self::Rsa(rsa)),
             Err(e) => Err(BuckyError::from(e)),
         }
@@ -128,11 +152,11 @@ impl PrivateKey {
     }
 
     pub fn generate_secp256k1_by_rng<R: Rng>(rng: &mut R) -> Result<Self, BuckyError> {
-        let key = ::secp256k1::SecretKey::random(rng);
+        let key = secp256k1::SecretKey::random(rng);
         Ok(Self::Secp256k1(key))
     }
 
-    pub fn generate_by_rng<R: Rng>(rng: &mut R, bits: Option<usize>, pt: PrivateKeyType) -> BuckyResult<Self> {
+    pub fn generate_by_rng<R: Rng + rand::CryptoRng>(rng: &mut R, bits: Option<usize>, pt: PrivateKeyType) -> BuckyResult<Self> {
         match pt {
             PrivateKeyType::Rsa => Self::generate_rsa_by_rng(rng, bits.unwrap_or(CYFS_PRIVTAE_KEY_DEFAULT_RSA_BITS)),
             PrivateKeyType::Secp256k1 => Self::generate_secp256k1_by_rng(rng)
@@ -143,12 +167,12 @@ impl PrivateKey {
         match self {
             Self::Rsa(private_key) => PublicKey::Rsa(private_key.to_public_key()),
             Self::Secp256k1(private_key) => {
-                PublicKey::Secp256k1(::secp256k1::PublicKey::from_secret_key(private_key))
+                PublicKey::Secp256k1(secp256k1::PublicKey::from_secret_key(private_key))
             }
         }
     }
 
-    pub fn sign(&self, data: &[u8], sign_source: SignatureSource) -> BuckyResult<Signature> {
+    pub fn sign(&self, data: &[u8]) -> BuckyResult<Signature> {
         let create_time = bucky_time_now();
 
         // 签名必须也包含签名的时刻，这个时刻是敏感的不可修改
@@ -162,7 +186,7 @@ impl PrivateKey {
                 let hash = hash_data(&data_new);
                 let sign = private_key
                     .sign(
-                        rsa::PaddingScheme::new_pkcs1v15_sign(Some(rsa::Hash::SHA2_256)),
+                        rsa::Pkcs1v15Sign::new::<rsa::sha2::Sha256>(),
                         &hash.as_slice(),
                     )?;
 
@@ -209,15 +233,15 @@ impl PrivateKey {
                     }
                 };
 
-                Signature::new(sign_source, 0, create_time, sign_data)
+                Signature::new(create_time, sign_data)
             }
 
             Self::Secp256k1(private_key) => {
                 let hash = hash_data(&data_new);
-                assert_eq!(HashValue::len(), ::secp256k1::util::MESSAGE_SIZE);
-                let ctx = ::secp256k1::Message::parse(hash.as_slice().try_into().unwrap());
+                assert_eq!(HashValue::len(), secp256k1::util::MESSAGE_SIZE);
+                let ctx = secp256k1::Message::parse(hash.as_slice().try_into().unwrap());
 
-                let (signature, _) = ::secp256k1::sign(&ctx, &private_key);
+                let (signature, _) = secp256k1::sign(&ctx, &private_key);
                 let sign_buf = signature.serialize();
 
                 let mut sign_array: [u32; 16] = [0; 16];
@@ -229,7 +253,7 @@ impl PrivateKey {
                     )
                 };
                 let sign_data = SignData::Ecc(GenericArray::from(sign_array));
-                Signature::new(sign_source, 0, create_time, sign_data)
+                Signature::new(create_time, sign_data)
             }
         };
 
@@ -257,7 +281,7 @@ impl PrivateKey {
         match self {
             Self::Rsa(private_key) => {
                 let buf = private_key
-                    .decrypt(rsa::PaddingScheme::PKCS1v15Encrypt, input)
+                    .decrypt(rsa::Pkcs1v15Encrypt, input)
                     .map_err(|e| BuckyError::from(e))?;
                 Ok(buf)
             }
@@ -310,10 +334,10 @@ impl PrivateKey {
             },
 
             Self::Secp256k1(private_key) => {
-                if input.len() < ::secp256k1::util::COMPRESSED_PUBLIC_KEY_SIZE {
+                if input.len() < secp256k1::util::COMPRESSED_PUBLIC_KEY_SIZE {
                     let msg = format!(
                         "not enough buffer for secp256k1 private key, except={}, got={}",
-                        ::secp256k1::util::COMPRESSED_PUBLIC_KEY_SIZE,
+                        secp256k1::util::COMPRESSED_PUBLIC_KEY_SIZE,
                         input.len()
                     );
                     error!("{}", msg);
@@ -321,9 +345,9 @@ impl PrivateKey {
                     return Err(BuckyError::new(BuckyErrorCode::InvalidFormat, msg));
                 }
 
-                let ephemeral_pk = ::secp256k1::PublicKey::parse_slice(
-                    &input[..::secp256k1::util::COMPRESSED_PUBLIC_KEY_SIZE],
-                    Some(::secp256k1::PublicKeyFormat::Compressed),
+                let ephemeral_pk = secp256k1::PublicKey::parse_slice(
+                    &input[..secp256k1::util::COMPRESSED_PUBLIC_KEY_SIZE],
+                    Some(secp256k1::PublicKeyFormat::Compressed),
                 )
                 .map_err(|e| {
                     let msg = format!("parse secp256k1 public key error: {}", e);
@@ -331,9 +355,96 @@ impl PrivateKey {
 
                     BuckyError::new(BuckyErrorCode::InvalidFormat, msg)
                 })?;
-                let aes_key = ::cyfs_ecies::utils::decapsulate(&ephemeral_pk, &private_key);
-                
-                Ok((&input[::secp256k1::util::COMPRESSED_PUBLIC_KEY_SIZE..], aes_key.into()))
+                let aes_key = ecies::utils::decapsulate(&ephemeral_pk, &private_key).map_err(|e| {
+                    BuckyError::new(BuckyErrorCode::CryptoError, format!("{}", e))
+                })?;
+
+                let mut key = [0u8; 48];
+                key[..aes_key.len()].copy_from_slice(aes_key.as_slice());
+                key[aes_key.len()..].copy_from_slice(&hash_data(aes_key.as_slice()).as_slice()[..16]);
+                Ok((&input[secp256k1::util::COMPRESSED_PUBLIC_KEY_SIZE..], key.into()))
+            }
+        }
+    }
+
+    #[cfg(feature = "x509")]
+    pub fn gen_ca_certificate(&self, subject: &str, days: u32) -> BuckyResult<Certificate> {
+        match self {
+            Self::Rsa(private_key) => {
+                let serial_number = SerialNumber::from(42u32);
+                let validity = Validity::from_now(Duration::from_secs(days as u64 * 24  *3600)).map_err(|e| {
+                    BuckyError::new(BuckyErrorCode::CryptoError, format!("{}", e))
+                })?;
+                let profile = Profile::Root;
+                let subject = Name::from_str(subject)
+                    .map_err(|e| {
+                        BuckyError::new(BuckyErrorCode::CryptoError, format!("{}", e))
+                    })?;
+                let der_pub = private_key.to_public_key().to_public_key_der().map_err(|e| {
+                    BuckyError::new(BuckyErrorCode::CryptoError, format!("{}", e))
+                })?;
+                let pub_key =
+                    SubjectPublicKeyInfoOwned::try_from(der_pub.as_bytes()).map_err(|e| {
+                        BuckyError::new(BuckyErrorCode::CryptoError, format!("{}", e))
+                    })?;
+
+                let signer = SigningKey::<Sha256>::new(private_key.clone());
+                let builder = CertificateBuilder::new(profile, serial_number, validity, subject, pub_key, &signer).map_err(|e| {
+                    BuckyError::new(BuckyErrorCode::CryptoError, format!("create certificate err {}", e))
+                })?;
+
+                let certificate = builder.build().map_err(|e| {
+                    BuckyError::new(BuckyErrorCode::CryptoError, format!("create certificate err {}", e))
+                })?;
+                Ok(certificate)
+            }
+            Self::Secp256k1(_) => {
+                let msg = format!("gen_ca_certificate not support for secp256k1 private key");
+                error!("{}", msg);
+                Err(BuckyError::new(BuckyErrorCode::NotSupport, msg))
+            }
+        }
+    }
+
+    #[cfg(feature = "x509")]
+    pub fn gen_leaf_certificate(&self, subject: &str, issuer: &str, days: u32, spki_pub: &[u8]) -> BuckyResult<Certificate> {
+        match self {
+            Self::Rsa(private_key) => {
+                let serial_number = SerialNumber::from(42u32);
+                let validity = Validity::from_now(Duration::from_secs(days as u64 * 24  *3600)).map_err(|e| {
+                    BuckyError::new(BuckyErrorCode::CryptoError, format!("{}", e))
+                })?;
+                let issuer = Name::from_str(issuer).map_err(|e| {
+                    BuckyError::new(BuckyErrorCode::CryptoError, format!("{}", e))
+                })?;
+                let profile = Profile::Leaf {
+                    issuer,
+                    enable_key_agreement: false,
+                    enable_key_encipherment: false,
+                };
+                let subject = Name::from_str(subject)
+                    .map_err(|e| {
+                        BuckyError::new(BuckyErrorCode::CryptoError, format!("{}", e))
+                    })?;
+                let pub_key =
+                    SubjectPublicKeyInfoOwned::try_from(spki_pub).map_err(|e| {
+                        BuckyError::new(BuckyErrorCode::CryptoError, format!("{}", e))
+                    })?;
+
+                let signer = SigningKey::<Sha256>::new(private_key.clone());
+                let builder = CertificateBuilder::new(profile, serial_number, validity, subject, pub_key, &signer).map_err(|e| {
+                    BuckyError::new(BuckyErrorCode::CryptoError, format!("create certificate err {}", e))
+                })?;
+
+                let certificate = builder.build().map_err(|e| {
+                    BuckyError::new(BuckyErrorCode::CryptoError, format!("create certificate err {}", e))
+                })?;
+                Ok(certificate)
+            }
+            Self::Secp256k1(_) => {
+                let msg = format!("gen_ca_certificate not support for secp256k1 private key");
+                error!("{}", msg);
+                Err(BuckyError::new(BuckyErrorCode::NotSupport, msg))
             }
         }
     }
@@ -344,10 +455,12 @@ impl RawEncode for PrivateKey {
         // 这里直接输出正确长度先，然后看如何优化
         match self {
             Self::Rsa(pk) => {
-                let spki_der = rsa_export::pkcs1::private_key(pk)?;
+                let spki_der = pk.to_pkcs1_der().map_err(|e| {
+                    BuckyError::new(BuckyErrorCode::CryptoError, format!("{}", e))
+                })?.as_bytes().to_vec();
                 Ok(spki_der.len() + 3)
             }
-            Self::Secp256k1(_) => Ok(::secp256k1::util::SECRET_KEY_SIZE + 1),
+            Self::Secp256k1(_) => Ok(secp256k1::util::SECRET_KEY_SIZE + 1),
         }
     }
 
@@ -366,7 +479,9 @@ impl RawEncode for PrivateKey {
 
         match self {
             Self::Rsa(pk) => {
-                let spki_der = rsa_export::pkcs1::private_key(pk)?;
+                let spki_der = pk.to_pkcs1_der().map_err(|e| {
+                    BuckyError::new(BuckyErrorCode::CryptoError, format!("{}", e))
+                })?.as_bytes().to_vec();
                 let mut buf = KEY_TYPE_RSA.raw_encode(buf, purpose)?;
                 buf = (spki_der.len() as u16).raw_encode(buf, purpose)?;
                 buf[..spki_der.len()].copy_from_slice(&spki_der.as_slice());
@@ -377,8 +492,8 @@ impl RawEncode for PrivateKey {
 
                 // 由于长度固定，所以我们这里不需要额外存储一个长度信息了
                 let key_buf = pk.serialize();
-                buf[..::secp256k1::util::SECRET_KEY_SIZE].copy_from_slice(&key_buf);
-                Ok(&mut buf[::secp256k1::util::SECRET_KEY_SIZE..])
+                buf[..secp256k1::util::SECRET_KEY_SIZE].copy_from_slice(&key_buf);
+                Ok(&mut buf[secp256k1::util::SECRET_KEY_SIZE..])
             }
         }
     }
@@ -403,23 +518,25 @@ impl<'de> RawDecode<'de> for PrivateKey {
                     ));
                 }
                 let der = &buf[..len as usize];
-                let private_key = rsa::RSAPrivateKey::from_pkcs1(der)?;
+                let private_key = rsa::RsaPrivateKey::from_pkcs1_der(der).map_err(|e| {
+                    BuckyError::new(BuckyErrorCode::CryptoError, format!("{}", e))
+                })?;
                 Ok((PrivateKey::Rsa(private_key), &buf[len as usize..]))
             }
             KEY_TYPE_SECP256K1 => {
-                if buf.len() < ::secp256k1::util::SECRET_KEY_SIZE {
+                if buf.len() < secp256k1::util::SECRET_KEY_SIZE {
                     return Err(BuckyError::new(
                         BuckyErrorCode::OutOfLimit,
                         "not enough buffer for secp256k1 privateKey",
                     ));
                 }
 
-                match ::secp256k1::SecretKey::parse_slice(
-                    &buf[..::secp256k1::util::SECRET_KEY_SIZE],
+                match secp256k1::SecretKey::parse_slice(
+                    &buf[..secp256k1::util::SECRET_KEY_SIZE],
                 ) {
                     Ok(private_key) => Ok((
                         PrivateKey::Secp256k1(private_key),
-                        &buf[::secp256k1::util::SECRET_KEY_SIZE..],
+                        &buf[secp256k1::util::SECRET_KEY_SIZE..],
                     )),
                     Err(e) => {
                         let msg = format!("parse secp256k1 private key error: {}", e);
@@ -439,7 +556,11 @@ impl<'de> RawDecode<'de> for PrivateKey {
 
 #[cfg(test)]
 mod test {
-    use crate::{PrivateKey, RawConvertTo, RawDecode, SignatureSource, Signature, RawFrom};
+    #[cfg(feature = "x509")]
+    use x509_cert::Certificate;
+    #[cfg(feature = "x509")]
+    use x509_cert::der::{Decode, Encode};
+    use crate::{PrivateKey, RawConvertTo, RawDecode, Signature, RawFrom};
 
     #[test]
     fn private_key() {
@@ -452,7 +573,7 @@ mod test {
     fn rsa_private_key_sign(bits: usize) {
         let msg = b"112233445566778899";
         let pk1 = PrivateKey::generate_rsa(bits).unwrap();
-        let sign = pk1.sign(msg, SignatureSource::RefIndex(0)).unwrap();
+        let sign = pk1.sign(msg).unwrap();
         assert!(pk1.public().verify(msg, &sign));
 
         let pk1_buf = pk1.to_vec().unwrap();
@@ -469,7 +590,7 @@ mod test {
     fn secp_private_key_sign() {
         let msg = b"112233445566778899";
         let pk1 = PrivateKey::generate_secp256k1().unwrap();
-        let sign = pk1.sign(msg, SignatureSource::RefIndex(0)).unwrap();
+        let sign = pk1.sign(msg).unwrap();
         assert!(pk1.public().verify(msg, &sign));
 
         let pk1_buf = pk1.to_vec().unwrap();
@@ -524,5 +645,15 @@ mod test {
         let (_buf, size) = pk1.decrypt_aeskey(&data, &mut output).unwrap();
         assert_eq!(size, origin_data.len());
         assert_eq!(&output[..origin_data.len()], origin_data);
+    }
+
+    #[cfg(feature = "x509")]
+    #[test]
+    fn test_x509() {
+        let pk1 = PrivateKey::generate_rsa(1024).unwrap();
+        let cert = pk1.gen_ca_certificate("CN=World domination corporation,O=World domination Inc,C=US", 365).unwrap();
+        let buf = cert.to_der().unwrap();
+        let cert2 = Certificate::from_der(&buf).unwrap();
+        assert_eq!(cert, cert2);
     }
 }

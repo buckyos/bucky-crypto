@@ -1,6 +1,6 @@
 use crate::*;
 
-use aes::{Aes256, BlockCipher};
+use ::aes::{Aes256, BlockCipher};
 use block_modes::block_padding::Pkcs7;
 use block_modes::{BlockMode, Cbc};
 use generic_array::typenum::{marker_traits::Unsigned, U48, U8};
@@ -10,6 +10,7 @@ use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::hash::Hash;
 use std::str::FromStr;
+use base58::{FromBase58, ToBase58};
 
 // aes key used to crypto data
 #[derive(Clone, Eq, PartialEq)]

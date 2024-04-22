@@ -1,8 +1,11 @@
 use crate::*;
 
 use rand::thread_rng;
-use rsa::{PublicKey as RSAPublicKeyTrait, PublicKeyParts};
 use std::convert::From;
+use rsa::pkcs1::{DecodeRsaPublicKey, EncodeRsaPublicKey};
+use rsa::traits::PublicKeyParts;
+use libsecp256k1 as secp256k1;
+use rsa::pkcs8::EncodePublicKey;
 
 // RSA
 const RAW_PUBLIC_KEY_RSA_1024_CODE: u8 = 0_u8;
@@ -19,8 +22,8 @@ const RAW_PUBLIC_KEY_SECP256K1_CODE: u8 = 10_u8;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PublicKey {
-    Rsa(rsa::RSAPublicKey),
-    Secp256k1(::secp256k1::PublicKey),
+    Rsa(rsa::RsaPublicKey),
+    Secp256k1(secp256k1::PublicKey),
     Invalid,
 }
 
@@ -44,7 +47,7 @@ impl PublicKey {
             Self::Rsa(pk) => pk.size() as usize,
             Self::Secp256k1(_) => {
                 // 采用压缩格式存储 33个字节
-                ::secp256k1::util::COMPRESSED_PUBLIC_KEY_SIZE
+                secp256k1::util::COMPRESSED_PUBLIC_KEY_SIZE
             }
             Self::Invalid => panic!("Should not come here"),
         }
@@ -70,7 +73,7 @@ impl PublicKey {
             Self::Rsa(public_key) => {
                 let mut rng = thread_rng();
                 let encrypted_buf =
-                    match public_key.encrypt(&mut rng, rsa::PaddingScheme::PKCS1v15Encrypt, data) {
+                    match public_key.encrypt(&mut rng, rsa::Pkcs1v15Encrypt, data) {
                         Ok(v) => v,
                         Err(e) => match e {
                             rsa::errors::Error::MessageTooLong => {
@@ -114,12 +117,17 @@ impl PublicKey {
                 Ok((key, output))
             }
             Self::Secp256k1(public_key) => {
-                let (ephemeral_sk, ephemeral_pk) = cyfs_ecies::utils::generate_keypair();
+                let (ephemeral_sk, ephemeral_pk) = ecies::utils::generate_keypair();
 
-                let aes_key = cyfs_ecies::utils::encapsulate(&ephemeral_sk, &public_key);
+                let aes_key = ecies::utils::encapsulate(&ephemeral_sk, &public_key).map_err(|e| {
+                    BuckyError::new(BuckyErrorCode::CryptoError, format!("{}", e))
+                })?;
                 let pk_buf = ephemeral_pk.serialize_compressed();
 
-                let key = AesKey::from(&aes_key);
+                let mut key = [0u8; 48];
+                key[..aes_key.len()].copy_from_slice(aes_key.as_slice());
+                key[aes_key.len()..].copy_from_slice(&hash_data(aes_key.as_slice()).as_slice()[..16]);
+                let key = AesKey::from(&key);
                 Ok((key, pk_buf.to_vec()))
             }
             Self::Invalid => panic!("Should not come here"),
@@ -139,7 +147,7 @@ impl PublicKey {
                 let hash = hash_data(&data_new);
                 public_key
                     .verify(
-                        rsa::PaddingScheme::new_pkcs1v15_sign(Some(rsa::Hash::SHA2_256)),
+                        rsa::Pkcs1v15Sign::new::<rsa::sha2::Sha256>(),
                         hash.as_slice(),
                         sign.as_slice(),
                     )
@@ -148,11 +156,11 @@ impl PublicKey {
             Self::Secp256k1(public_key) => {
                 // 生成消息摘要
                 let hash = hash_data(&data_new);
-                assert_eq!(HashValue::len(), ::secp256k1::util::MESSAGE_SIZE);
-                let ctx = ::secp256k1::Message::parse(hash.as_slice().try_into().unwrap());
+                assert_eq!(HashValue::len(), secp256k1::util::MESSAGE_SIZE);
+                let ctx = secp256k1::Message::parse(hash.as_slice().try_into().unwrap());
 
                 // 解析签名段
-                let sign = match ::secp256k1::Signature::parse_slice(sign.as_slice()) {
+                let sign = match secp256k1::Signature::parse_standard_slice(sign.as_slice()) {
                     Ok(sign) => sign,
                     Err(e) => {
                         error!("parse secp256k1 signature error: {}", e);
@@ -162,6 +170,40 @@ impl PublicKey {
 
                 // 使用公钥进行校验
                 secp256k1::verify(&ctx, &sign, &public_key)
+            }
+            Self::Invalid => panic!("Should not come here"),
+        }
+    }
+
+    pub fn to_spki_der(&self) -> BuckyResult<Vec<u8>> {
+        match self {
+            Self::Rsa(pk) => {
+                let spki = pk.to_public_key_der().map_err(|e| {
+                    BuckyError::new(BuckyErrorCode::CryptoError, format!("{}", e))
+                })?;
+                Ok(spki.into_vec())
+            }
+            Self::Secp256k1(_) => {
+                let msg = format!("secp256k1 public key not support to spki der!");
+                error!("{}", msg);
+                Err(BuckyError::new(BuckyErrorCode::NotSupport, msg))
+            }
+            Self::Invalid => panic!("Should not come here"),
+        }
+    }
+
+    pub fn to_pkcs1_der(&self) -> BuckyResult<Vec<u8>> {
+        match self {
+            Self::Rsa(pk) => {
+                let pkcs1 = pk.to_pkcs1_der().map_err(|e| {
+                    BuckyError::new(BuckyErrorCode::CryptoError, format!("{}", e))
+                })?;
+                Ok(pkcs1.into_vec())
+            }
+            Self::Secp256k1(_) => {
+                let msg = format!("secp256k1 public key not support to pkcs1 der!");
+                error!("{}", msg);
+                Err(BuckyError::new(BuckyErrorCode::NotSupport, msg))
             }
             Self::Invalid => panic!("Should not come here"),
         }
@@ -194,7 +236,7 @@ impl RawEncode for PublicKey {
                     }
                 }
             }
-            Self::Secp256k1(_) => Ok(::secp256k1::util::COMPRESSED_PUBLIC_KEY_SIZE + 1),
+            Self::Secp256k1(_) => Ok(secp256k1::util::COMPRESSED_PUBLIC_KEY_SIZE + 1),
             Self::Invalid => {
                 let msg = format!("invalid publicKey!");
                 error!("{}", msg);
@@ -243,20 +285,22 @@ impl RawEncode for PublicKey {
                     return Err(BuckyError::new(BuckyErrorCode::OutOfLimit, msg));
                 }
 
-                let spki_der = rsa_export::pkcs1::public_key(pk)?;
+                let spki_der = pk.to_pkcs1_der().map_err(|e| {
+                    BuckyError::new(BuckyErrorCode::CryptoError, format!("{}", e))
+                })?.into_vec();
                 assert!(spki_der.len() <= len - 1);
                 buf[0] = code;
                 buf[1..spki_der.len() + 1].copy_from_slice(&spki_der.as_slice());
                 buf[spki_der.len() + 1..]
                     .iter_mut()
-                    .for_each(|padding| *padding = 0);
+                    .for_each(|padding| *padding = (len - spki_der.len() - 1) as u8);
 
                 Ok(&mut buf[len..])
             }
             Self::Secp256k1(public_key) => {
                 buf[0] = RAW_PUBLIC_KEY_SECP256K1_CODE;
                 let key_buf = public_key.serialize_compressed();
-                let total_len = ::secp256k1::util::COMPRESSED_PUBLIC_KEY_SIZE + 1;
+                let total_len = secp256k1::util::COMPRESSED_PUBLIC_KEY_SIZE + 1;
                 buf[1..total_len].copy_from_slice(&key_buf);
 
                 Ok(&mut buf[total_len..])
@@ -301,11 +345,26 @@ impl<'de> RawDecode<'de> for PublicKey {
 
                     return Err(BuckyError::new(BuckyErrorCode::OutOfLimit, msg));
                 }
-                let pk = rsa::RSAPublicKey::from_pkcs1(&buf[1..len])?;
+                let padding_len = buf[len - 1];
+                let mut data_len = len;
+                let mut has_pending = true;
+                for i in 0..padding_len {
+                    if buf[len - 1 - i as usize] != padding_len {
+                        has_pending = false;
+                        break;
+                    }
+                }
+                if has_pending {
+                    data_len = len - padding_len as usize;
+                }
+
+                let pk = rsa::RsaPublicKey::from_pkcs1_der(&buf[1..data_len]).map_err(|e| {
+                    BuckyError::new(BuckyErrorCode::CryptoError, format!("{}", e))
+                })?;
                 Ok((PublicKey::Rsa(pk), &buf[len..]))
             }
             RAW_PUBLIC_KEY_SECP256K1_CODE => {
-                let len = ::secp256k1::util::COMPRESSED_PUBLIC_KEY_SIZE + 1;
+                let len = secp256k1::util::COMPRESSED_PUBLIC_KEY_SIZE + 1;
                 if buf.len() < len {
                     let msg = format!(
                         "not enough buffer for decode secp256k1 PublicKey, except={}, got={}",
@@ -317,7 +376,7 @@ impl<'de> RawDecode<'de> for PublicKey {
                     return Err(BuckyError::new(BuckyErrorCode::OutOfLimit, msg));
                 }
 
-                match ::secp256k1::PublicKey::parse_compressed((&buf[1..len]).try_into().unwrap()) {
+                match secp256k1::PublicKey::parse_compressed((&buf[1..len]).try_into().unwrap()) {
                     Ok(public_key) => Ok((PublicKey::Secp256k1(public_key), &buf[len..])),
                     Err(e) => {
                         let msg = format!("parse secp256k1 public key error: {}", e);
@@ -465,6 +524,8 @@ impl<'r> RawEncode for PublicKeyRef<'r> {
 
 #[cfg(test)]
 mod test {
+    use rsa::pkcs1::der::{Encode, EncodePem};
+    use rsa::pkcs1::LineEnding;
     use crate::{PrivateKey, PublicKey, RawConvertTo, RawDecode};
 
     #[test]
@@ -494,5 +555,18 @@ mod test {
         assert!(buf.len() == 0);
 
         assert_eq!(sk1.public(), pk2);
+    }
+
+    #[cfg(feature = "x509")]
+    #[test]
+    fn test_leaf_cert() {
+        let pk1 = PrivateKey::generate_rsa(1024).unwrap();
+        let cert = pk1.gen_ca_certificate("CN=World domination corporation,O=World domination Inc,C=US", 365).unwrap();
+        let buf = cert.to_der().unwrap();
+
+        let pk2 = PrivateKey::generate_rsa(1024).unwrap();
+        let cert2 = pk1.gen_leaf_certificate("CN=World domination corporation", "CN=World domination corporation,O=World domination Inc,C=US", 365, pk2.public().to_spki_der().unwrap().as_slice()).unwrap();
+        let str = cert2.to_pem(LineEnding::LF).unwrap();
+        println!("{}", str);
     }
 }
