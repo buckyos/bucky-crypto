@@ -263,6 +263,8 @@ pub trait RawObjHash: RawEncode {
     }
 }
 
+impl<T> RawObjHash for T where T: RawEncode {}
+
 #[cfg(test)]
 mod test {
     use std::str::FromStr;
