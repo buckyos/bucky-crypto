@@ -250,6 +250,19 @@ impl ProtobufTransform<Vec<u8>> for HashValue {
     }
 }
 
+pub trait RawObjHash: RawEncode {
+
+    // 计算对象的hash
+    fn raw_hash_value(&self) -> BuckyResult<HashValue> {
+        let encoded_buf = self.raw_hash_encode()?;
+        Ok(self.hash_buf(&encoded_buf))
+    }
+
+    fn hash_buf(&self, encoded_buf: &[u8]) -> HashValue {
+        hash_data(encoded_buf)
+    }
+}
+
 #[cfg(test)]
 mod test {
     use std::str::FromStr;

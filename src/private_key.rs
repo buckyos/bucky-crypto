@@ -4,14 +4,12 @@ use generic_array::GenericArray;
 use libc::memcpy;
 use rand::{thread_rng, Rng};
 use std::{os::raw::c_void, str::FromStr};
-use std::time::Duration;
 use bucky_time::bucky_time_now;
 use rsa::pkcs1::{DecodeRsaPrivateKey, EncodeRsaPrivateKey};
 use rsa::traits::PublicKeyParts;
 use libsecp256k1 as secp256k1;
 #[cfg(feature = "x509")]
 use rsa::pkcs1v15::SigningKey;
-use rsa::sha2::Sha256;
 #[cfg(feature = "x509")]
 use x509_cert::builder::{Builder, CertificateBuilder, Profile};
 #[cfg(feature = "x509")]
@@ -28,7 +26,6 @@ use x509_cert::spki::SubjectPublicKeyInfoOwned;
 use x509_cert::time::Validity;
 #[cfg(feature = "x509")]
 use rsa::pkcs1::EncodeRsaPublicKey;
-use rsa::pkcs8::EncodePublicKey;
 
 // 密钥类型的编码
 pub(crate) const KEY_TYPE_RSA: u8 = 0u8;
