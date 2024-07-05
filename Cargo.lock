@@ -403,7 +403,7 @@ dependencies = [
 [[package]]
 name = "bucky-raw-codec"
 version = "0.1.0"
-source = "git+https://github.com/buckyos/bucky-raw-codec.git?branch=main#394327272f9b1caf35a2e3f1b33ea8ae6fe76727"
+source = "git+https://github.com/buckyos/bucky-raw-codec.git#791a13de5152c7ce47b90eea06dbc29e59b5904f"
 dependencies = [
  "bucky-error",
  "bucky-raw-codec-derive",
@@ -420,7 +420,7 @@ dependencies = [
 [[package]]
 name = "bucky-raw-codec-derive"
 version = "0.1.0"
-source = "git+https://github.com/buckyos/bucky-raw-codec.git?branch=main#394327272f9b1caf35a2e3f1b33ea8ae6fe76727"
+source = "git+https://github.com/buckyos/bucky-raw-codec.git#791a13de5152c7ce47b90eea06dbc29e59b5904f"
 dependencies = [
  "proc-macro2",
  "quote",
