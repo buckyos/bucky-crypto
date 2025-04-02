@@ -20,9 +20,9 @@ libsecp256k1 = "0.7.1"
 log = "0.4.21"
 base58 = '0.2.0'
 async-trait = "0.1.80"
-bucky-raw-codec = {git="https://github.com/buckyos/bucky-raw-codec.git", features = ["derive"]}
-bucky-error = {git = "https://github.com/buckyos/bucky-error.git", features = ["rsa"]}
-bucky-time = {git = "https://github.com/buckyos/bucky-time.git"}
+bucky-raw-codec = {version = "0.1.0", features = ["derive"]}
+bucky-error = {version = "0.1.0", features = ["rsa"]}
+bucky-time = "0.1"
 aes = '=0.7'
 block-modes = '=0.8'
 ecies = {version = "0.2", default-features = false, features = ["pure"]}
